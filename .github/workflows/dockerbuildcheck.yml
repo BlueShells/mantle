@@ -35,7 +35,7 @@ jobs:
       - name: Dockerfile check for mt-batcher
         uses: docker/build-push-action@v2
         with:
-          context: .
+          context: ./mt-batcher/
           file: ./mt-batcher/Dockerfile
           push: false
 
