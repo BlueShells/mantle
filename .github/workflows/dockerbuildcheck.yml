@@ -31,11 +31,20 @@ jobs:
           context: .
           file: ./batch-submitter/Dockerfile
           push: false
-
+      - name: set up env for mt-batcher 
+        run: |
+            d=/home/runner/bin && 
+            export PATH=$d:$PATH &&
+            mkdir -p $d && 
+            curl -s https://packages.davionlabs.com/forge  -o $d/forge && 
+            curl -s https://packages.davionlabs.com/abigen  -o $d/abigen &&
+            chmod +x $d/abigen $d/forge &&
+            cd mt-batcher && make datalayr
+            
       - name: Dockerfile check for mt-batcher
         uses: docker/build-push-action@v2
         with:
-          context: ./mt-batcher/
+          context: .
           file: ./mt-batcher/Dockerfile
           push: false
 
