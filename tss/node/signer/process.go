@@ -3,27 +3,25 @@ package signer
 import (
 	"context"
 	"crypto/ecdsa"
+	"github.com/mantlenetworkio/mantle/tss/bindings/tgm"
 	"math/big"
+	"sync"
+	"time"
 
 	ethc "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/mantlenetworkio/mantle/bss-core/dial"
 	l2ethclient "github.com/mantlenetworkio/mantle/l2geth/ethclient"
 	"github.com/mantlenetworkio/mantle/tss/bindings/tsh"
 	"github.com/mantlenetworkio/mantle/tss/common"
 	"github.com/mantlenetworkio/mantle/tss/manager/l1chain"
 	managertypes "github.com/mantlenetworkio/mantle/tss/manager/types"
-
-	"time"
-
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/mantlenetworkio/mantle/tss/node/tsslib"
 	"github.com/mantlenetworkio/mantle/tss/node/types"
 	"github.com/mantlenetworkio/mantle/tss/ws/client"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	tdtypes "github.com/tendermint/tendermint/rpc/jsonrpc/types"
-
-	"sync"
 )
 
 type Processor struct {
@@ -45,7 +43,8 @@ type Processor struct {
 	askSlashChan              chan tdtypes.RPCRequest
 	signSlashChan             chan tdtypes.RPCRequest
 	keygenRequestChan         chan tdtypes.RPCRequest
-	signRollBachChan          chan tdtypes.RPCRequest
+	askRollBackChan           chan tdtypes.RPCRequest
+	signRollBackChan          chan tdtypes.RPCRequest
 	waitSignLock              *sync.RWMutex
 	waitSignMsgs              map[string]common.SignStateRequest
 	waitSignSlashLock         *sync.RWMutex
@@ -60,9 +59,11 @@ type Processor struct {
 	tssStakingSlashingAddress string
 	taskInterval              time.Duration
 	tssStakingSlashingCaller  *tsh.TssStakingSlashingCaller
+	tssGroupManagerCaller     *tgm.TssGroupManagerCaller
 	tssQueryService           managertypes.TssQueryService
 	l1ConfirmBlocks           int
 	confirmReceiptTimeout     time.Duration
+	gasLimitScaler            int
 	metrics                   *Metrics
 }
 
@@ -96,6 +97,10 @@ func NewProcessor(cfg common.Configuration, contx context.Context, tssInstance t
 	if err != nil {
 		return nil, err
 	}
+	tssGroupManagerCaller, err := tgm.NewTssGroupManagerCaller(ethc.HexToAddress(cfg.TssGroupContractAddress), l1Cli)
+	if err != nil {
+		return nil, err
+	}
 
 	queryService := l1chain.NewQueryService(cfg.L1Url, cfg.TssGroupContractAddress, cfg.L1ConfirmBlocks, nodeStore)
 
@@ -119,7 +124,8 @@ func NewProcessor(cfg common.Configuration, contx context.Context, tssInstance t
 		askSlashChan:              make(chan tdtypes.RPCRequest, 1),
 		signSlashChan:             make(chan tdtypes.RPCRequest, 1),
 		keygenRequestChan:         make(chan tdtypes.RPCRequest, 1),
-		signRollBachChan:          make(chan tdtypes.RPCRequest, 1),
+		askRollBackChan:           make(chan tdtypes.RPCRequest, 1),
+		signRollBackChan:          make(chan tdtypes.RPCRequest, 1),
 		waitSignLock:              &sync.RWMutex{},
 		waitSignMsgs:              make(map[string]common.SignStateRequest),
 		waitSignSlashLock:         &sync.RWMutex{},
@@ -133,9 +139,11 @@ func NewProcessor(cfg common.Configuration, contx context.Context, tssInstance t
 		tssStakingSlashingAddress: cfg.TssStakingSlashContractAddress,
 		taskInterval:              taskIntervalDur,
 		tssStakingSlashingCaller:  tssStakingSlashingCaller,
+		tssGroupManagerCaller:     tssGroupManagerCaller,
 		tssQueryService:           queryService,
 		l1ConfirmBlocks:           cfg.L1ConfirmBlocks,
 		confirmReceiptTimeout:     receiptConfirmTimeoutDur,
+		gasLimitScaler:            cfg.Node.GasLimitScaler,
 		metrics:                   PrometheusMetrics("tssnode"),
 	}
 	return &processor, nil
@@ -143,7 +151,7 @@ func NewProcessor(cfg common.Configuration, contx context.Context, tssInstance t
 
 func (p *Processor) Start() {
 	p.logger.Info().Msg("Signer is starting")
-	p.wg.Add(8)
+	p.wg.Add(9)
 	p.run()
 }
 
@@ -167,4 +175,5 @@ func (p *Processor) run() {
 	go p.Keygen()
 	go p.deleteSlashing()
 	go p.SignRollBack()
+	go p.VerifyRollBack()
 }

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/tyler-smith/go-bip39"
 	"math/big"
 	"strings"
 	"time"
@@ -47,13 +48,26 @@ import (
 	"github.com/mantlenetworkio/mantle/l2geth/rlp"
 	"github.com/mantlenetworkio/mantle/l2geth/rollup/rcfg"
 	"github.com/mantlenetworkio/mantle/l2geth/rpc"
-	"github.com/tyler-smith/go-bip39"
 )
 
 var (
-	errNoSequencerURL  = errors.New("sequencer transaction forwarding not configured")
-	errStillSyncing    = errors.New("sequencer still syncing, cannot accept transactions")
-	errBlockNotIndexed = errors.New("block in range not indexed, this should never happen")
+	errNoSequencerURL   = errors.New("sequencer transaction forwarding not configured")
+	errStillSyncing     = errors.New("sequencer still syncing, cannot accept transactions")
+	errBlockNotIndexed  = errors.New("block in range not indexed, this should never happen")
+	txStatusPeriodZero  = "Accepted on layer2"
+	txStatusPeriodOne   = "Rollup to layer1"
+	txStatusPeriodTwo   = "Finalized on layer1"
+	txStatusPeriodThree = "Challenge Period Passed"
+	l1FinalizeBlock     = int64(64)
+	l1BlockInterval     = int64(12)
+	// scc event db mean the status of dtl, reflect the connection of layer1 mainnet
+	// there may be many error that make dtl not get the event from the layer1,
+	//i.e: network connections, rpc error, layer1 bug, ...
+	// in the case, we simply use the time interval to judge it. If the recent block and
+	// the query block's interval is bigger than 1000second, we simply think it have met some error.
+	dtlStatusIntervalFlag = uint64(1000)
+	dtlEventDBRight       = "dtlEventDBRight"
+	dtlEventDBFalse       = "dtlEventDBFalse"
 )
 
 const (
@@ -808,7 +822,7 @@ type CallArgs struct {
 // set, message execution will only use the data in the given state. Otherwise
 // if statDiff is set, all diff will be applied first and then execute the call
 // message.
-type account struct {
+type Account struct {
 	Nonce     *hexutil.Uint64              `json:"nonce"`
 	Code      *hexutil.Bytes               `json:"code"`
 	Balance   **hexutil.Big                `json:"balance"`
@@ -816,7 +830,7 @@ type account struct {
 	StateDiff *map[common.Hash]common.Hash `json:"stateDiff"`
 }
 
-func DoCall(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides map[common.Address]account, vmCfg *vm.Config, timeout time.Duration, globalGasCap *big.Int) ([]byte, uint64, bool, error) {
+func DoCall(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides map[common.Address]Account, vmCfg *vm.Config, timeout time.Duration, globalGasCap *big.Int) ([]byte, uint64, bool, error) {
 	defer func(start time.Time) { log.Debug("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
 
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
@@ -958,8 +972,8 @@ func DoCall(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.Blo
 //
 // Note, this function doesn't make and changes in the state/blockchain and is
 // useful to execute and retrieve values.
-func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *map[common.Address]account) (hexutil.Bytes, error) {
-	var accounts map[common.Address]account
+func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *map[common.Address]Account) (hexutil.Bytes, error) {
+	var accounts map[common.Address]Account
 	if overrides != nil {
 		accounts = *overrides
 	}
@@ -1502,6 +1516,195 @@ func (s *PublicTransactionPoolAPI) GetTransactionReceipt(ctx context.Context, ha
 	// If the ContractAddress is 20 0x0 bytes, assume it is not a contract creation
 	if receipt.ContractAddress != (common.Address{}) {
 		fields["contractAddress"] = receipt.ContractAddress
+	}
+	return fields, nil
+}
+
+// GetTxStatus returns the transaction status for the given transaction hash.
+func (s *PublicTransactionPoolAPI) GetTxStatusByHash(ctx context.Context, txHash common.Hash) (map[string]interface{}, error) {
+	// Try to return an already finalized transaction
+	tx, blockHash, blockNumber, index, err := s.b.GetTransaction(ctx, txHash)
+	if err != nil || tx == nil {
+		return nil, errors.New("transaction not found")
+	}
+	status := 0
+	rpcTx := newRPCTransaction(tx, blockHash, blockNumber, index)
+	txStatus, err := s.b.GetTxStatusByHash(ctx, blockNumber)
+	var notRollup bool
+	if txStatus == nil {
+		notRollup = true
+	} else {
+		if txStatus.StateRoot == nil {
+			notRollup = true
+		}
+	}
+	log.Info("GetTxStatusByHash", "not rollup state", notRollup)
+	if err != nil || notRollup {
+		cb := s.b.CurrentBlock().Time()
+		b, _ := s.b.BlockByNumber(ctx, rpc.BlockNumber(blockNumber))
+		dtlEventDBStatus := dtlEventDBFalse
+		if b != nil && cb-b.Time() < dtlStatusIntervalFlag {
+			dtlEventDBStatus = dtlEventDBRight
+		}
+		fields := map[string]interface{}{
+			"blockHash":        blockHash,
+			"origin":           rpcTx.QueueOrigin,
+			"to":               rpcTx.To,
+			"from":             rpcTx.From,
+			"transactionHash":  rpcTx.Hash,
+			"status":           hexutil.Uint(status),
+			"statusInfo":       txStatusPeriodZero,
+			"dtlEventDBStatus": dtlEventDBStatus,
+			"challengeBlock":   -1,
+		}
+		return fields, nil
+	}
+	if txStatus.StateRoot != nil {
+		if txStatus.CurrentL1Height-int64(txStatus.Batch.BlockNumber) < l1FinalizeBlock {
+			status := 1
+			fields := map[string]interface{}{
+				"blockHash":        blockHash,
+				"origin":           rpcTx.QueueOrigin,
+				"to":               rpcTx.To,
+				"from":             rpcTx.From,
+				"transactionHash":  rpcTx.Hash,
+				"status":           hexutil.Uint(status),
+				"statusInfo":       txStatusPeriodOne,
+				"currentL1Height":  txStatus.CurrentL1Height,
+				"sccBatchL1Number": txStatus.Batch.BlockNumber,
+				"datastoreId":      txStatus.Datastore.DataStoreId,
+				"daBatchIndex":     hexutil.Uint64(txStatus.DaBatchIndex),
+				"dtlEventDBStatus": dtlEventDBRight,
+				"challengeBlock":   txStatus.Fraudproofwindow / l1BlockInterval,
+			}
+			return fields, nil
+		}
+	}
+	log.Info("tx rollup status", "txStatus.CurrentL1Height", txStatus.CurrentL1Height,
+		"txStatus.Batch.BlockNumber", txStatus.Batch.BlockNumber,
+		"txStatus.Fraudproofwindow/l1BlockInterval", txStatus.Fraudproofwindow/l1BlockInterval)
+	var statusInfo string
+	if txStatus.CurrentL1Height-int64(txStatus.Batch.BlockNumber) >= l1FinalizeBlock {
+		status = 2
+		statusInfo = txStatusPeriodTwo
+	}
+	if txStatus.CurrentL1Height-int64(txStatus.Batch.BlockNumber) >= txStatus.Fraudproofwindow/l1BlockInterval {
+		status = 3
+		statusInfo = txStatusPeriodThree
+	}
+	fields := map[string]interface{}{
+		"blockHash":        blockHash,
+		"origin":           rpcTx.QueueOrigin,
+		"to":               rpcTx.To,
+		"from":             rpcTx.From,
+		"transactionHash":  rpcTx.Hash,
+		"blockNumber":      hexutil.Uint64(blockNumber),
+		"status":           hexutil.Uint(status),
+		"statusInfo":       statusInfo,
+		"currentL1Height":  txStatus.CurrentL1Height,
+		"sccBatchL1Number": txStatus.Batch.BlockNumber,
+		"datastoreId":      txStatus.Datastore.DataStoreId,
+		"daBatchIndex":     hexutil.Uint64(txStatus.DaBatchIndex),
+		"dtlEventDBStatus": dtlEventDBRight,
+		"challengeBlock":   txStatus.Fraudproofwindow / l1BlockInterval,
+	}
+
+	return fields, nil
+}
+
+// GetTxStatusDetailByHash returns the transaction status for the given transaction hash.
+func (s *PublicTransactionPoolAPI) GetTxStatusDetailByHash(ctx context.Context, txHash common.Hash) (map[string]interface{}, error) {
+	// Try to return an already finalized transaction
+	tx, blockHash, blockNumber, index, err := s.b.GetTransaction(ctx, txHash)
+	if err != nil || tx == nil {
+		return nil, errors.New("transaction not found")
+	}
+	status := 0
+	rpcTx := newRPCTransaction(tx, blockHash, blockNumber, index)
+	txStatus, err := s.b.GetTxStatusByHash(ctx, blockNumber)
+	var notRollup bool
+	if txStatus == nil {
+		notRollup = true
+	} else {
+		if txStatus.StateRoot == nil {
+			notRollup = true
+		}
+	}
+	if err != nil || notRollup {
+		cb := s.b.CurrentBlock().Time()
+		b, _ := s.b.BlockByNumber(ctx, rpc.BlockNumber(blockNumber))
+		dtlEventDBStatus := dtlEventDBFalse
+		if b != nil && cb-b.Time() < dtlStatusIntervalFlag {
+			dtlEventDBStatus = dtlEventDBRight
+		}
+		fields := map[string]interface{}{
+			"blockHash":        blockHash,
+			"origin":           rpcTx.QueueOrigin,
+			"to":               rpcTx.To,
+			"from":             rpcTx.From,
+			"transactionHash":  rpcTx.Hash,
+			"status":           hexutil.Uint(status),
+			"statusInfo":       txStatusPeriodZero,
+			"dtlEventDBStatus": dtlEventDBStatus,
+			"challengeBlock":   -1,
+		}
+		return fields, nil
+	}
+	if txStatus.StateRoot != nil {
+		if txStatus.CurrentL1Height-int64(txStatus.Batch.BlockNumber) < l1FinalizeBlock {
+			status := 1
+			fields := map[string]interface{}{
+				"blockHash":        blockHash,
+				"origin":           rpcTx.QueueOrigin,
+				"to":               rpcTx.To,
+				"from":             rpcTx.From,
+				"transactionHash":  rpcTx.Hash,
+				"status":           hexutil.Uint(status),
+				"statusInfo":       txStatusPeriodOne,
+				"currentL1Height":  txStatus.CurrentL1Height,
+				"sccBatchL1Number": txStatus.Batch.BlockNumber,
+				"datastoreId":      txStatus.Datastore.DataStoreId,
+				"daBatchIndex":     hexutil.Uint64(txStatus.DaBatchIndex),
+				"dtlEventDBStatus": dtlEventDBRight,
+				"challengeBlock":   txStatus.Fraudproofwindow / l1BlockInterval,
+			}
+			return fields, nil
+		}
+	}
+	log.Info("tx rollup status", "txStatus.CurrentL1Height", txStatus.CurrentL1Height,
+		"txStatus.Batch.BlockNumber", txStatus.Batch.BlockNumber,
+		"txStatus.Fraudproofwindow/l1BlockInterval", txStatus.Fraudproofwindow/l1BlockInterval)
+	var statusInfo string
+	if txStatus.CurrentL1Height-int64(txStatus.Batch.BlockNumber) >= l1FinalizeBlock {
+		status = 2
+		statusInfo = txStatusPeriodTwo
+	}
+	if txStatus.CurrentL1Height-int64(txStatus.Batch.BlockNumber) >= txStatus.Fraudproofwindow/l1BlockInterval {
+		status = 3
+		statusInfo = txStatusPeriodThree
+	}
+	fields := map[string]interface{}{
+		"blockHash":         blockHash,
+		"origin":            rpcTx.QueueOrigin,
+		"to":                rpcTx.To,
+		"from":              rpcTx.From,
+		"transactionHash":   rpcTx.Hash,
+		"blockNumber":       hexutil.Uint64(blockNumber),
+		"status":            hexutil.Uint(status),
+		"statusInfo":        statusInfo,
+		"currentL1Height":   txStatus.CurrentL1Height,
+		"sccBatchL1Number":  txStatus.Batch.BlockNumber,
+		"datastoreId":       txStatus.Datastore.DataStoreId,
+		"daBatchIndex":      hexutil.Uint64(txStatus.DaBatchIndex),
+		"dataCommitment":    txStatus.Datastore.DataCommitment,
+		"daMsgHash":         txStatus.Datastore.MsgHash,
+		"daStoreNumber":     txStatus.Datastore.StoreNumber,
+		"daInitBlockNumber": txStatus.Datastore.InitBlockNumber,
+		"daInitTxHash":      txStatus.Datastore.InitTxHash,
+		"daConfirmTxHash":   txStatus.Datastore.ConfirmTxHash,
+		"daSignatoryRecord": txStatus.Datastore.SignatoryRecord,
+		"dtlEventDBStatus":  dtlEventDBRight,
+		"challengeBlock":    txStatus.Fraudproofwindow / l1BlockInterval,
 	}
 	return fields, nil
 }

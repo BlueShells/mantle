@@ -72,9 +72,9 @@ type Receipt struct {
 	L1GasUsed  *big.Int   `json:"l1GasUsed" gencodec:"required"`
 	L1Fee      *big.Int   `json:"l1Fee" gencodec:"required"`
 	FeeScalar  *big.Float `json:"l1FeeScalar" gencodec:"required"`
-	DAGasPrice *big.Int   `json:"daGasPrice" `
-	DAGasUsed  *big.Int   `json:"daGasUsed" `
-	DAFee      *big.Int   `json:"daFee"`
+	DAGasPrice *big.Int   `json:"daGasPrice" gencodec:"required"`
+	DAGasUsed  *big.Int   `json:"daGasUsed" gencodec:"required"`
+	DAFee      *big.Int   `json:"daFee" gencodec:"required"`
 }
 
 type receiptMarshaling struct {
@@ -88,9 +88,9 @@ type receiptMarshaling struct {
 	L1GasUsed         *hexutil.Big
 	L1Fee             *hexutil.Big
 	// use eigen DA
-	DAGasUsed  *big.Int
-	DAGasPrice *big.Int
-	DAFee      *big.Int
+	DAGasUsed  *hexutil.Big
+	DAGasPrice *hexutil.Big
+	DAFee      *hexutil.Big
 }
 
 // receiptRLP is the consensus encoding of a receipt.

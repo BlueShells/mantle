@@ -3,6 +3,7 @@ package signer
 import (
 	"bytes"
 	"encoding/json"
+
 	"github.com/mantlenetworkio/mantle/tss/common"
 	tdtypes "github.com/tendermint/tendermint/rpc/jsonrpc/types"
 )
@@ -49,7 +50,7 @@ func (p *Processor) VerifySlash() {
 					}
 				} else if askRequest.SignType == common.SlashTypeLiveness {
 					found, info := p.nodeStore.GetSlashingInfo(askRequest.Address, askRequest.BatchIndex)
-					logger.Info().Msgf("--------- found value %s ", found)
+					logger.Info().Msgf("address %s,batch index %d, found value %s ", askRequest.Address, askRequest.BatchIndex, found)
 					if found && info.SlashType == common.SlashTypeLiveness {
 						ret = true
 					}

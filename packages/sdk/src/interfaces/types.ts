@@ -23,7 +23,7 @@ export enum L1ChainID {
  * L2 network chain IDs
  */
 export enum L2ChainID {
-  MANTLE = 10,
+  MANTLE = 5000,
   MANTLE_TESTNET = 5001,
   MANTLE_GOERLIQA = 1705003,
   MANTLE_KOVAN = 69,
@@ -41,6 +41,7 @@ export interface OEL1Contracts {
   StateCommitmentChain: Contract
   CanonicalTransactionChain: Contract
   BondManager: Contract
+  Rollup: Contract
 }
 
 /**
@@ -53,7 +54,7 @@ export interface OEL2Contracts {
   BVM_L2ToL1MessagePasser: Contract
   BVM_DeployerWhitelist: Contract
   BVM_ETH: Contract
-  BVM_BIT: Contract
+  BVM_MANTLE: Contract
   BVM_GasPriceOracle: Contract
   BVM_SequencerFeeVault: Contract
   WETH: Contract

@@ -14,6 +14,7 @@ import '@typechain/hardhat'
 import 'hardhat-deploy'
 import 'hardhat-gas-reporter'
 import 'hardhat-output-validator'
+import 'hardhat-abi-exporter'
 
 // Hardhat tasks
 import './tasks'
@@ -30,15 +31,16 @@ import { subtask } from 'hardhat/config'
 import {
   TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS,
   TASK_COMPILE_SOLIDITY_LOG_COMPILATION_RESULT,
-  TASK_COMPILE_SOLIDITY_LOG_NOTHING_TO_COMPILE
+  TASK_COMPILE_SOLIDITY_LOG_NOTHING_TO_COMPILE,
 } from 'hardhat/builtin-tasks/task-names'
+
 import { spawnSync } from 'child_process'
 
 subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS).setAction(
   async (_, __, runSuper) => {
     console.log('running task')
     // copySync(
-    //   '../../datalayr-mantle/contracts/eignlayr-contracts/src',
+    //   '../../datalayr/contracts/eignlayr-contracts/src',
     //   './contracts/libraries/eigenda/lib'
     // )
     const paths = await runSuper()
@@ -71,6 +73,9 @@ subtask(TASK_COMPILE_SOLIDITY_LOG_NOTHING_TO_COMPILE).setAction(
   }
 )
 
+// @ts-ignore
+// @ts-ignore
+// @ts-ignore
 const config: HardhatUserConfig = {
   networks: {
     hardhat: {
@@ -154,13 +159,13 @@ const config: HardhatUserConfig = {
       {
         version: '0.8.9',
         settings: {
-          optimizer: { enabled: true, runs: 10_000 },
+          optimizer: { enabled: true, runs: 200 },
         },
       },
       {
         version: '0.5.17', // Required for WETH9
         settings: {
-          optimizer: { enabled: true, runs: 10_000 },
+          optimizer: { enabled: true, runs: 200 },
         },
       },
     ],
@@ -183,6 +188,11 @@ const config: HardhatUserConfig = {
     deploy: './deploy',
     deployments: './deployments',
     deployConfig: './deploy-config',
+  },
+  abiExporter: {
+    path: './abi',
+    runOnCompile: true,
+    clear: true,
   },
   namedAccounts: {
     deployer: {
@@ -230,6 +240,10 @@ const config: HardhatUserConfig = {
     exclude: ['contracts/test-helpers', 'contracts/test-libraries'],
   },
   deployConfigSpec: {
+    allowUnlimitedContractSize: {
+      type: 'boolean',
+      default: true,
+    },
     isForkedNetwork: {
       type: 'boolean',
       default: false,
@@ -321,11 +335,11 @@ const config: HardhatUserConfig = {
     },
     gasPriceOracleIsBurning: {
       type: 'number',
-      default: 1,
+      default: 0,
     },
     gasPriceOracleCharge: {
       type: 'number',
-      default: 0,
+      default: 1,
     },
     gasPriceOracleL1BaseFee: {
       type: 'number',
@@ -333,11 +347,29 @@ const config: HardhatUserConfig = {
     },
     gasPriceOracleL2GasPrice: {
       type: 'number',
-      default: 1,
+      default: 50_000_000,
     },
     hfBerlinBlock: {
       type: 'number',
       default: 0,
+    },
+    contractsDeployerKey: {
+      type: 'string',
+    },
+    contractsRpcUrl: {
+      type: 'string',
+    },
+    tssRewardSendAmountPerYear: {
+      type: 'number',
+    },
+    tssRewardWaitingTime: {
+      type: 'number',
+    },
+    tssDelegationManagerMinStakeAmount: {
+      type: 'string',
+    },
+    tssManagerAddress: {
+      type: 'string',
     },
   },
 }

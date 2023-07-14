@@ -2,26 +2,24 @@ package oracle
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/metrics"
+
+	bsscore "github.com/mantlenetworkio/mantle/bss-core"
 	"github.com/mantlenetworkio/mantle/gas-oracle/bindings"
 	ometrics "github.com/mantlenetworkio/mantle/gas-oracle/metrics"
-)
 
-var (
-	txSendCounter           = metrics.NewRegisteredCounter("tx/send", ometrics.DefaultRegistry)
-	txNotSignificantCounter = metrics.NewRegisteredCounter("tx/not_significant", ometrics.DefaultRegistry)
-	gasPriceGauge           = metrics.NewRegisteredGauge("gas_price", ometrics.DefaultRegistry)
-	txConfTimer             = metrics.NewRegisteredTimer("tx/confirmed", ometrics.DefaultRegistry)
-	txSendTimer             = metrics.NewRegisteredTimer("tx/send", ometrics.DefaultRegistry)
+	kms "cloud.google.com/go/kms/apiv1"
+	"google.golang.org/api/option"
 )
 
 // getLatestBlockNumberFn is used by the GasPriceUpdater
@@ -63,16 +61,37 @@ type DeployContractBackend interface {
 // perhaps this should take an options struct along with the backend?
 // how can this continue to be decomposed?
 func wrapUpdateL2GasPriceFn(backend DeployContractBackend, cfg *Config) (func(uint64) error, error) {
-	if cfg.privateKey == nil {
-		return nil, errNoPrivateKey
-	}
-	if cfg.l2ChainID == nil {
-		return nil, errNoChainID
-	}
+	var opts *bind.TransactOpts
+	var err error
+	if !cfg.EnableHsm {
+		if cfg.privateKey == nil {
+			return nil, errNoPrivateKey
+		}
+		if cfg.l2ChainID == nil {
+			return nil, errNoChainID
+		}
 
-	opts, err := bind.NewKeyedTransactorWithChainID(cfg.privateKey, cfg.l2ChainID)
-	if err != nil {
-		return nil, err
+		opts, err = bind.NewKeyedTransactorWithChainID(cfg.privateKey, cfg.l2ChainID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		seqBytes, err := hex.DecodeString(cfg.HsmCreden)
+		apikey := option.WithCredentialsJSON(seqBytes)
+		client, err := kms.NewKeyManagementClient(context.Background(), apikey)
+		if err != nil {
+			log.Crit("gasoracle", "create signer error", err.Error())
+		}
+		mk := &bsscore.ManagedKey{
+			KeyName:      cfg.HsmAPIName,
+			EthereumAddr: common.HexToAddress(cfg.HsmAddress),
+			Gclient:      client,
+		}
+		opts, err = mk.NewEthereumTransactorrWithChainID(context.Background(), cfg.l2ChainID)
+		if err != nil {
+			log.Crit("gasoracle", "create signer error", err.Error())
+			return nil, err
+		}
 	}
 
 	// Don't send the transaction using the `contract` so that we can inspect
@@ -114,7 +133,7 @@ func wrapUpdateL2GasPriceFn(backend DeployContractBackend, cfg *Config) (func(ui
 		// no need to update when they are the same
 		if currentPrice.Uint64() == updatedGasPrice {
 			log.Info("gas price did not change", "gas-price", updatedGasPrice)
-			txNotSignificantCounter.Inc(1)
+			ometrics.GasOracleStats.TxNotSignificantCounter.Inc(1)
 			return nil
 		}
 
@@ -123,7 +142,7 @@ func wrapUpdateL2GasPriceFn(backend DeployContractBackend, cfg *Config) (func(ui
 		if !isDifferenceSignificant(currentPrice.Uint64(), updatedGasPrice, cfg.l2GasPriceSignificanceFactor) {
 			log.Info("gas price did not significantly change", "min-factor", cfg.l2GasPriceSignificanceFactor,
 				"current-price", currentPrice, "next-price", updatedGasPrice)
-			txNotSignificantCounter.Inc(1)
+			ometrics.GasOracleStats.TxNotSignificantCounter.Inc(1)
 			return nil
 		}
 
@@ -139,11 +158,11 @@ func wrapUpdateL2GasPriceFn(backend DeployContractBackend, cfg *Config) (func(ui
 		if err := backend.SendTransaction(context.Background(), tx); err != nil {
 			return err
 		}
-		txSendTimer.Update(time.Since(pre))
+		ometrics.GasOracleStats.TxSendTimer.Update(time.Since(pre))
 		log.Info("L2 gas price transaction sent", "hash", tx.Hash().Hex())
 
-		gasPriceGauge.Update(int64(updatedGasPrice))
-		txSendCounter.Inc(1)
+		ometrics.GasOracleStats.L2GasPriceGauge.Update(int64(updatedGasPrice))
+		ometrics.GasOracleStats.TxSendCounter.Inc(1)
 
 		if cfg.waitForReceipt {
 			// Keep track of the time it takes to confirm the transaction
@@ -153,7 +172,7 @@ func wrapUpdateL2GasPriceFn(backend DeployContractBackend, cfg *Config) (func(ui
 			if err != nil {
 				return err
 			}
-			txConfTimer.Update(time.Since(pre))
+			ometrics.GasOracleStats.TxConfTimer.Update(time.Since(pre))
 
 			log.Info("L2 gas price transaction confirmed", "hash", tx.Hash().Hex(),
 				"gas-used", receipt.GasUsed, "blocknumber", receipt.BlockNumber)

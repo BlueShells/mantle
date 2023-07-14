@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/influxdata/influxdb/pkg/slices"
-	"github.com/mantlenetworkio/mantle/l2geth/crypto"
-	tmjson "github.com/tendermint/tendermint/libs/json"
-	"math/big"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/influxdata/influxdb/pkg/slices"
+	"github.com/mantlenetworkio/mantle/l2geth/crypto"
+	tmjson "github.com/tendermint/tendermint/libs/json"
 
 	"github.com/mantlenetworkio/mantle/l2geth/log"
 	tss "github.com/mantlenetworkio/mantle/tss/common"
@@ -88,37 +88,17 @@ func (m Manager) sign(ctx types.Context, request interface{}, digestBz []byte, m
 						}
 
 						poolPubKeyBz, _ := hex.DecodeString(ctx.TssInfos().ClusterPubKey)
+						if len(signResponse.Signature) < 64 {
+							log.Error(fmt.Sprintf("invalid signature, expected length is no less than 64, actual length is %d", len(signResponse.Signature)))
+							return
+						}
 						if !crypto.VerifySignature(poolPubKeyBz, digestBz, signResponse.Signature[:64]) {
 							log.Error("illegal signature")
 							return
 						}
 
-						if method != tss.SignSlash { // if it is not signSlash, then exit when receiving the first valid response
-							validSignResponse = &signResponse
-							return
-						}
-
-						// if signing slashing, we chose a better gas price as the valid one
-						if validSignResponse == nil {
-							slashTxGasPrice, succ := new(big.Int).SetString(signResponse.SlashTxGasPrice, 10)
-							if !succ {
-								log.Error("wrong format of slashTxGasPrice")
-								return
-							}
-							signResponse.SlashTxGasPriceBigInt = slashTxGasPrice
-							validSignResponse = &signResponse
-						} else {
-							// if current gas price > last node gas price, replace it
-							slashTxGasPrice, succ := new(big.Int).SetString(signResponse.SlashTxGasPrice, 10)
-							if !succ {
-								log.Error("wrong format of slashTxGasPrice")
-								return
-							}
-							if slashTxGasPrice.Cmp(validSignResponse.SlashTxGasPriceBigInt) > 0 {
-								signResponse.SlashTxGasPriceBigInt = slashTxGasPrice
-								validSignResponse = &signResponse
-							}
-						}
+						validSignResponse = &signResponse
+						return
 					} else if resp.RpcResponse.Error.Code == tss.CulpritErrorCode {
 						_, ok := responseNodes[resp.SourceNode]
 						if ok { // ignore if handled

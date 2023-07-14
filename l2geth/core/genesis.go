@@ -31,6 +31,7 @@ import (
 	"github.com/mantlenetworkio/mantle/l2geth/core/rawdb"
 	"github.com/mantlenetworkio/mantle/l2geth/core/state"
 	"github.com/mantlenetworkio/mantle/l2geth/core/types"
+	"github.com/mantlenetworkio/mantle/l2geth/core/upgrade"
 	"github.com/mantlenetworkio/mantle/l2geth/crypto"
 	"github.com/mantlenetworkio/mantle/l2geth/ethdb"
 	"github.com/mantlenetworkio/mantle/l2geth/log"
@@ -141,10 +142,10 @@ func (e *GenesisMismatchError) Error() string {
 // SetupGenesisBlock writes or updates the genesis block in db.
 // The block that will be used is:
 //
-//                          genesis == nil       genesis != nil
-//                       +------------------------------------------
-//     db has no genesis |  main-net default  |  genesis
-//     db has genesis    |  from DB           |  genesis (if compatible)
+//	                     genesis == nil       genesis != nil
+//	                  +------------------------------------------
+//	db has no genesis |  main-net default  |  genesis
+//	db has genesis    |  from DB           |  genesis (if compatible)
 //
 // The stored chain configuration will be updated if it is compatible (i.e. does not
 // specify a fork block below the local head block). In case of a conflict, the
@@ -167,6 +168,11 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, genesis *Genesis, override
 			genesis = DefaultGenesisBlock()
 		} else {
 			log.Info("Writing custom genesis block")
+		}
+		//for a new node from 0 to recent height, we must reset its genesis gaslimit to 150000000
+		if genesis.Config.ChainID.Int64() == params.MantleTestnetChainID.Int64() {
+			// updata gaslimt block is actived！we need to reset the gaslimit for genesis block
+			genesis.GasLimit = uint64(upgrade.PreUpgradedGaslimit)
 		}
 		block, err := genesis.Commit(db)
 		if err != nil {

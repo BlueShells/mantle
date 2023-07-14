@@ -33,6 +33,16 @@ export interface StateRootBatchResponse {
   stateRoots: StateRootEntry[]
 }
 
+export interface TxStatusResponse {
+  batch: StateRootBatchEntry
+  stateRoots: StateRootEntry[]
+  currentL1BlockNumber: number
+  daBatchIndex: number
+  datastore: DataStoreEntry
+  fraudProofWindow:number
+}
+
+
 export interface ContextResponse {
   blockNumber: number
   timestamp: number
@@ -59,12 +69,6 @@ export interface BatchTxByDataStoreIdResponse {
 
 export interface DataStoreByIdResponse {
   dataStore: DataStoreEntry
-}
-
-export interface TestResponse {
-  len: number
-  putdata: string
-  data: string
 }
 
 export interface TxListByStoreIdResponse {

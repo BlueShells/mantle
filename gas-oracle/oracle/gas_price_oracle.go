@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
+
 	"github.com/mantlenetworkio/mantle/gas-oracle/bindings"
 	"github.com/mantlenetworkio/mantle/gas-oracle/gasprices"
+	ometrics "github.com/mantlenetworkio/mantle/gas-oracle/metrics"
 	"github.com/mantlenetworkio/mantle/gas-oracle/tokenprice"
 )
 
@@ -44,6 +47,8 @@ type GasPriceOracle struct {
 	l2Backend       DeployContractBackend
 	l1Backend       bind.ContractTransactor
 	daBackend       *bindings.BVMEigenDataLayrFee
+	sccBackend      *bindings.StateCommitmentChain
+	ctcBackend      *bindings.CanonicalTransactionChain
 	gasPriceUpdater *gasprices.GasPriceUpdater
 	config          *Config
 }
@@ -56,11 +61,16 @@ func (g *GasPriceOracle) Start() error {
 	if g.config.l2ChainID == nil {
 		return fmt.Errorf("layer-two: %w", errNoChainID)
 	}
-	if g.config.privateKey == nil {
-		return errNoPrivateKey
+	var address common.Address
+	if !g.config.EnableHsm {
+		if g.config.privateKey == nil {
+			return errNoPrivateKey
+		}
+		address = crypto.PubkeyToAddress(g.config.privateKey.PublicKey)
+	} else {
+		address = common.HexToAddress(g.config.HsmAddress)
 	}
 
-	address := crypto.PubkeyToAddress(g.config.privateKey.PublicKey)
 	log.Info("Starting Gas Price Oracle", "l1-chain-id", g.l1ChainID,
 		"l2-chain-id", g.l2ChainID, "address", address.Hex())
 
@@ -70,13 +80,16 @@ func (g *GasPriceOracle) Start() error {
 	if err != nil {
 		return err
 	}
-	gasPriceGauge.Update(int64(price.Uint64()))
+	ometrics.GasOracleStats.L2GasPriceGauge.Update(int64(price.Uint64()))
 
 	log.Info("Starting Gas Price Oracle enableL1BaseFee", "enableL1BaseFee",
 		g.config.enableL1BaseFee, "enableL2GasPrice", g.config.enableL2GasPrice, "enableDaFee", g.config.enableDaFee)
 
 	if g.config.enableL1BaseFee {
 		go g.BaseFeeLoop()
+	}
+	if g.config.enableL1Overhead {
+		go g.OverHeadLoop()
 	}
 	if g.config.enableDaFee {
 		go g.DaFeeLoop()
@@ -106,7 +119,12 @@ func (g *GasPriceOracle) ensure() error {
 	if err != nil {
 		return err
 	}
-	address := crypto.PubkeyToAddress(g.config.privateKey.PublicKey)
+	var address common.Address
+	if g.config.EnableHsm {
+		address = common.HexToAddress(g.config.HsmAddress)
+	} else {
+		address = crypto.PubkeyToAddress(g.config.privateKey.PublicKey)
+	}
 	if address != owner {
 		log.Error("Signing key does not match contract owner", "signer", address.Hex(), "owner", owner.Hex())
 		return errInvalidSigningKey
@@ -141,14 +159,12 @@ func (g *GasPriceOracle) BaseFeeLoop() {
 	if err != nil {
 		panic(err)
 	}
-
 	for {
 		select {
 		case <-timer.C:
 			if err := updateBaseFee(); err != nil {
-				log.Error("cannot update l1 base fee", "messgae", err)
+				log.Error("cannot update l1 base fee", "message", err)
 			}
-
 		case <-g.ctx.Done():
 			g.Stop()
 		}
@@ -171,6 +187,41 @@ func (g *GasPriceOracle) DaFeeLoop() {
 				log.Error("cannot update da fee", "messgae", err)
 			}
 
+		case <-g.ctx.Done():
+			g.Stop()
+		}
+	}
+}
+
+func (g *GasPriceOracle) OverHeadLoop() {
+	stateBatchAppendChan := make(chan *bindings.StateCommitmentChainStateBatchAppended, 10)
+	stateAppendSub, err := g.sccBackend.WatchStateBatchAppended(&bind.WatchOpts{Context: g.ctx}, stateBatchAppendChan, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer stateAppendSub.Unsubscribe()
+	ctcTotalBatches, err := g.ctcBackend.GetTotalBatches(&bind.CallOpts{})
+	if err != nil {
+		panic(err)
+	}
+	updateOverhead, err := wrapUpdateOverhead(g.l2Backend, g.config)
+	if err != nil {
+		panic(err)
+	}
+
+	for {
+		select {
+		case ev := <-stateBatchAppendChan:
+			currentCtcBatches, err := g.ctcBackend.GetTotalBatches(&bind.CallOpts{})
+			if err != nil {
+				continue
+			}
+			log.Info("current scc batch size", "size", ev.BatchSize)
+			log.Info("CTC circle num in SCC circle", "count", new(big.Int).Sub(currentCtcBatches, ctcTotalBatches))
+			if err := updateOverhead(new(big.Int).Sub(currentCtcBatches, ctcTotalBatches), ev.BatchSize); err != nil {
+				log.Error("cannot update da fee", "messgae", err)
+			}
+			ctcTotalBatches = currentCtcBatches
 		case <-g.ctx.Done():
 			g.Stop()
 		}
@@ -204,7 +255,8 @@ func (g *GasPriceOracle) Update() error {
 
 // NewGasPriceOracle creates a new GasPriceOracle based on a Config
 func NewGasPriceOracle(cfg *Config) (*GasPriceOracle, error) {
-	tokenPricer := tokenprice.NewClient(cfg.bybitBackendURL, cfg.tokenPricerUpdateFrequencySecond)
+	tokenPricer := tokenprice.NewClient(cfg.PriceBackendURL, cfg.PriceBackendUniswapURL,
+		cfg.tokenPricerUpdateFrequencySecond, cfg.tokenRatioMode, cfg.tokenPairMNTMode)
 	if tokenPricer == nil {
 		return nil, fmt.Errorf("invalid token price client")
 	}
@@ -214,11 +266,22 @@ func NewGasPriceOracle(cfg *Config) (*GasPriceOracle, error) {
 		return nil, err
 	}
 
-	l1Client, err := NewL1Client(cfg.ethereumHttpUrl, tokenPricer)
+	l1Client, err := NewL1Client(cfg.ethereumWssUrl, tokenPricer)
 	if err != nil {
 		return nil, err
 	}
 	daFeeClient, err := bindings.NewBVMEigenDataLayrFee(cfg.daFeeContractAddress, l1Client.Client)
+	if err != nil {
+		return nil, err
+	}
+	sccBackend, err := bindings.NewStateCommitmentChain(cfg.sccContractAddress, l1Client.Client)
+	if err != nil {
+		return nil, err
+	}
+	ctcBackend, err := bindings.NewCanonicalTransactionChain(cfg.ctcContractAddress, l1Client.Client)
+	if err != nil {
+		return nil, err
+	}
 	// Ensure that we can actually connect to both backends
 	log.Info("Connecting to layer two")
 	if err := ensureConnection(l2Client); err != nil {
@@ -290,7 +353,7 @@ func NewGasPriceOracle(cfg *Config) (*GasPriceOracle, error) {
 		cfg.l1ChainID = l1ChainID
 	}
 
-	if cfg.privateKey == nil {
+	if !cfg.EnableHsm && cfg.privateKey == nil {
 		return nil, errNoPrivateKey
 	}
 
@@ -343,6 +406,8 @@ func NewGasPriceOracle(cfg *Config) (*GasPriceOracle, error) {
 		l2Backend:       l2Client,
 		l1Backend:       l1Client,
 		daBackend:       daFeeClient,
+		sccBackend:      sccBackend,
+		ctcBackend:      ctcBackend,
 	}
 
 	if err := gpo.ensure(); err != nil {

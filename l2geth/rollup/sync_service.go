@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"sync"
@@ -39,7 +40,8 @@ var (
 	// errZeroGasPriceTx is the error for when a user submits a transaction
 	// with gas price zero and fees are currently enforced
 	errZeroGasPriceTx = errors.New("cannot accept 0 gas price transaction")
-	float1            = big.NewFloat(1)
+	feeThresholdDown  = big.NewFloat(1)
+	feeThresholdUp    = big.NewFloat(4000)
 )
 
 // SyncService implements the main functionality around pulling in transactions
@@ -127,17 +129,17 @@ func NewSyncService(ctx context.Context, cfg Config, txpool *core.TxPool, bc *co
 	}
 	// Ensure sane values for the fee thresholds
 	if cfg.FeeThresholdDown != nil {
-		// The fee threshold down should be less than 1
-		if cfg.FeeThresholdDown.Cmp(float1) != -1 {
-			return nil, fmt.Errorf("%w: fee threshold down not lower than 1: %f", errBadConfig,
-				cfg.FeeThresholdDown)
+		// The fee threshold down should be <= feeThresholdDown
+		if cfg.FeeThresholdDown.Cmp(feeThresholdDown) == 1 {
+			return nil, fmt.Errorf("%w: fee threshold down not lower than %f: %f", errBadConfig,
+				feeThresholdDown, cfg.FeeThresholdDown)
 		}
 	}
 	if cfg.FeeThresholdUp != nil {
-		// The fee threshold up should be greater than 1
-		if cfg.FeeThresholdUp.Cmp(float1) != 1 {
-			return nil, fmt.Errorf("%w: fee threshold up not larger than 1: %f", errBadConfig,
-				cfg.FeeThresholdUp)
+		// The fee threshold up should be >= feeThresholdUp
+		if cfg.FeeThresholdUp.Cmp(feeThresholdUp) == -1 {
+			return nil, fmt.Errorf("%w: fee threshold up not larger than %f: %f", errBadConfig,
+				feeThresholdUp, cfg.FeeThresholdUp)
 		}
 	}
 
@@ -1249,7 +1251,7 @@ func (s *SyncService) verifyFee(tx *types.Transaction) error {
 		}
 		if errors.Is(err, fees.ErrGasPriceTooHigh) {
 			return fmt.Errorf("%w: %d wei, use at most tx.gasPrice = %s wei",
-				fees.ErrGasPriceTooHigh, tx.GasPrice(), l2GasPrice)
+				fees.ErrGasPriceTooHigh, tx.GasPrice(), mulByFloat(l2GasPrice, opts.ThresholdUp))
 		}
 		return err
 	}
@@ -1439,58 +1441,57 @@ func (s *SyncService) syncTransactionBatchRange(start, end uint64) error {
 }
 
 func (s *SyncService) syncEigenTransactionBatchRange(start, end uint64) error {
-	if end > start {
-		log.Info("Syncing eigen transaction batch range", "start", start, "end", end)
-		for i := start; i <= end; i++ {
-			log.Debug("Fetching transaction batch", "index", i)
-			if s.dtlEigenEnable {
-				dtlRollupInfo, err := s.dtlEigenClient.GetDtlRollupStoreByBatchIndex(int64(i))
+	log.Info("Syncing eigen transaction batch range", "start", start, "end", end)
+	for i := start; i <= end; i++ {
+		log.Debug("Fetching transaction batch", "index", i)
+		if s.dtlEigenEnable {
+			dtlRollupInfo, err := s.dtlEigenClient.GetDtlRollupStoreByBatchIndex(int64(i))
+			if err != nil {
+				return fmt.Errorf("cannot get rollup store by batch index from dtl: %w", err)
+			}
+			if dtlRollupInfo.DataStoreId != 0 {
+				log.Info("Dtl rollup upgrade datastore id", "upgradeDatastoreId", dtlRollupInfo.UpgradeDataStoreId)
+				txs, err := s.dtlEigenClient.GetDtlBatchTransactionByDataStoreId(dtlRollupInfo.DataStoreId + dtlRollupInfo.UpgradeDataStoreId)
 				if err != nil {
-					return fmt.Errorf("cannot get rollup store by batch index from dtl: %w", err)
+					return fmt.Errorf("cannot get eigen transaction batch from dtl: %w", err)
 				}
-				if dtlRollupInfo.DataStoreId != 0 {
-					txs, err := s.dtlEigenClient.GetDtlBatchTransactionByDataStoreId(dtlRollupInfo.DataStoreId)
+				for _, tx := range txs {
+					verified, err := s.verifyTx(tx)
 					if err != nil {
-						return fmt.Errorf("cannot get eigen transaction batch from dtl: %w", err)
+						return err
 					}
-					for _, tx := range txs {
-						verified, err := s.verifyTx(tx)
-						if err != nil {
-							return err
-						}
-						if verified {
-							if err := s.applyBatchedTransaction(tx); err != nil {
-								return fmt.Errorf("cannot apply batched transaction: %w", err)
-							}
+					if verified {
+						if err := s.applyBatchedTransaction(tx); err != nil {
+							return fmt.Errorf("cannot apply batched transaction: %w", err)
 						}
 					}
-					log.Info("set latest eigen batch index", "index", i)
-					s.SetLatestEigenBatchIndex(&i)
 				}
-			} else {
-				rollupInfo, err := s.eigenClient.GetRollupStoreByRollupBatchIndex(int64(i))
+				log.Info("set latest eigen batch index", "index", i)
+				s.SetLatestEigenBatchIndex(&i)
+			}
+		} else {
+			rollupInfo, err := s.eigenClient.GetRollupStoreByRollupBatchIndex(int64(i))
+			if err != nil {
+				return fmt.Errorf("cannot get rollup store by batch index: %w", err)
+			}
+			if rollupInfo.DataStoreId != 0 {
+				txs, err := s.eigenClient.GetBatchTransactionByDataStoreId(rollupInfo.DataStoreId, s.l1MsgSender)
 				if err != nil {
-					return fmt.Errorf("cannot get rollup store by batch index: %w", err)
+					return fmt.Errorf("cannot get eigen transaction batch: %w", err)
 				}
-				if rollupInfo.DataStoreId != 0 {
-					txs, err := s.eigenClient.GetBatchTransactionByDataStoreId(rollupInfo.DataStoreId, s.l1MsgSender)
+				for _, tx := range txs {
+					verified, err := s.verifyTx(tx)
 					if err != nil {
-						return fmt.Errorf("cannot get eigen transaction batch: %w", err)
+						return err
 					}
-					for _, tx := range txs {
-						verified, err := s.verifyTx(tx)
-						if err != nil {
-							return err
-						}
-						if verified {
-							if err := s.applyBatchedTransaction(tx); err != nil {
-								return fmt.Errorf("cannot apply batched transaction: %w", err)
-							}
+					if verified {
+						if err := s.applyBatchedTransaction(tx); err != nil {
+							return fmt.Errorf("cannot apply batched transaction: %w", err)
 						}
 					}
-					log.Info("set latest eigen batch index", "index", i)
-					s.SetLatestEigenBatchIndex(&i)
 				}
+				log.Info("set latest eigen batch index", "index", i)
+				s.SetLatestEigenBatchIndex(&i)
 			}
 		}
 	}
@@ -1608,4 +1609,30 @@ func (s *SyncService) verifyTx(tx *types.Transaction) (bool, error) {
 	} else {
 		return true, nil
 	}
+}
+
+func (s *SyncService) GetTxStatusByNumber(number uint64) (*types.TxStatusResponse, error) {
+	index := number - 1
+	if index < 0 {
+		return nil, errors.New("index should bigger or equal than 0")
+	}
+	stateRsp, err := s.client.GetTxStatusResponse(index, s.backend)
+	if err != nil {
+		return nil, err
+	}
+	if stateRsp == nil {
+		return nil, errors.New("tx status not ready")
+	}
+
+	return stateRsp, nil
+}
+
+// mulByFloat multiplies a big.Int by a float and returns the
+// big.Int rounded upwards
+func mulByFloat(num *big.Int, float *big.Float) *big.Int {
+	n := new(big.Float).SetUint64(num.Uint64())
+	product := n.Mul(n, float)
+	pfloat, _ := product.Float64()
+	rounded := math.Ceil(pfloat)
+	return new(big.Int).SetUint64(uint64(rounded))
 }

@@ -63,6 +63,9 @@ type Config struct {
 	// Tss manager client Url
 	TssClientUrl string
 
+	// jwt access token
+	JwtSecret string
+
 	// eigen layer upgrade block.
 	DaUpgradeBlock uint64
 
@@ -74,6 +77,9 @@ type Config struct {
 
 	// SCCAddress is the SCC contract address.
 	SCCAddress string
+
+	// FPRollupAddress is the fraud proof rollup contract address.
+	FPRollupAddress string
 
 	// MinL1TxSize is the minimum size in bytes of any L1 transactions generated
 	// by the batch submitter.
@@ -201,6 +207,31 @@ type Config struct {
 
 	// DisableHTTP2 disables HTTP2 support.
 	DisableHTTP2 bool
+
+	EnableSccRollback bool
+
+	// use cloud-hsm to sign for proposer
+	EnableProposerHsm bool
+
+	ProposerHsmAddress string
+
+	ProposerHsmAPIName string
+
+	ProposerHsmCreden string
+
+	// use cloud-hsm to sign for sequencer
+	EnableSequencerHsm bool
+
+	SequencerHsmAddress string
+
+	SequencerHsmAPIName string
+
+	SequencerHsmCreden string
+
+	RollupClientHttp string
+
+	// batch submitter rollback
+	AllowL2AutoRollback bool
 }
 
 // NewConfig parses the Config from the provided flags or environment variables.
@@ -213,10 +244,12 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		L1EthRpc:                  ctx.GlobalString(flags.L1EthRpcFlag.Name),
 		L2EthRpc:                  ctx.GlobalString(flags.L2EthRpcFlag.Name),
 		TssClientUrl:              ctx.GlobalString(flags.TssClientUrl.Name),
+		JwtSecret:                 ctx.GlobalString(flags.JwtSecret.Name),
 		DaUpgradeBlock:            ctx.GlobalUint64(flags.DaUpgradeBlockFlag.Name),
 		DAAddress:                 ctx.GlobalString(flags.DaAddressFlag.Name),
 		CTCAddress:                ctx.GlobalString(flags.CTCAddressFlag.Name),
 		SCCAddress:                ctx.GlobalString(flags.SCCAddressFlag.Name),
+		FPRollupAddress:           ctx.GlobalString(flags.FPRollupAddressFlag.Name),
 		MinL1TxSize:               ctx.GlobalUint64(flags.MinL1TxSizeFlag.Name),
 		MaxL1TxSize:               ctx.GlobalUint64(flags.MaxL1TxSizeFlag.Name),
 		MaxPlaintextBatchSize:     ctx.GlobalUint64(flags.MaxPlaintextBatchSizeFlag.Name),
@@ -249,6 +282,17 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		MetricsHostname:     ctx.GlobalString(flags.MetricsHostnameFlag.Name),
 		MetricsPort:         ctx.GlobalUint64(flags.MetricsPortFlag.Name),
 		DisableHTTP2:        ctx.GlobalBool(flags.HTTP2DisableFlag.Name),
+		EnableSccRollback:   ctx.GlobalBool(flags.SccRollbackFlag.Name),
+		EnableSequencerHsm:  ctx.GlobalBool(flags.EnableSequencerHsmFlag.Name),
+		SequencerHsmAddress: ctx.GlobalString(flags.SequencerHsmAddressFlag.Name),
+		SequencerHsmAPIName: ctx.GlobalString(flags.SequencerHsmAPIName.Name),
+		SequencerHsmCreden:  ctx.GlobalString(flags.SequencerHsmCreden.Name),
+		EnableProposerHsm:   ctx.GlobalBool(flags.EnableProposerHsmFlag.Name),
+		ProposerHsmAddress:  ctx.GlobalString(flags.ProposerHsmAddressFlag.Name),
+		ProposerHsmAPIName:  ctx.GlobalString(flags.ProposerHsmAPIName.Name),
+		ProposerHsmCreden:   ctx.GlobalString(flags.ProposerHsmCreden.Name),
+		RollupClientHttp:    ctx.GlobalString(flags.RollupClientHttpFlag.Name),
+		AllowL2AutoRollback: ctx.GlobalBool(flags.AllowL2AutoRollback.Name),
 	}
 
 	err := ValidateConfig(&cfg)

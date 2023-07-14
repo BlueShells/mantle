@@ -33,7 +33,7 @@ contract BVM_SequencerFeeVault is Ownable {
     uint256 public constant L1Gas = 200_000;
 
     address public burner;
-    // Minimum ETH balance that can be withdrawn in a single withdrawal.
+    // Minimum Mantle token balance that can be withdrawn in a single withdrawal.
     uint256 public minWithdrawalAmount;
 
     /***************
@@ -83,7 +83,7 @@ contract BVM_SequencerFeeVault is Ownable {
         }
 
         L2StandardBridge(Lib_PredeployAddresses.L2_STANDARD_BRIDGE).withdrawTo(
-            Lib_PredeployAddresses.BVM_BIT,
+            Lib_PredeployAddresses.BVM_MANTLE,
             to,
             address(this).balance,
             0,

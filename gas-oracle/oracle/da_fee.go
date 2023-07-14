@@ -2,23 +2,52 @@ package oracle
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/log"
+
+	bsscore "github.com/mantlenetworkio/mantle/bss-core"
 	"github.com/mantlenetworkio/mantle/gas-oracle/bindings"
+	ometrics "github.com/mantlenetworkio/mantle/gas-oracle/metrics"
+
+	kms "cloud.google.com/go/kms/apiv1"
+	"google.golang.org/api/option"
 )
 
 func wrapUpdateDaFee(daBackend *bindings.BVMEigenDataLayrFee, l2Backend DeployContractBackend, cfg *Config) (func() error, error) {
-	if cfg.privateKey == nil {
-		return nil, errNoPrivateKey
-	}
-	if cfg.l2ChainID == nil {
-		return nil, errNoChainID
-	}
+	var opts *bind.TransactOpts
+	var err error
+	if !cfg.EnableHsm {
+		if cfg.privateKey == nil {
+			return nil, errNoPrivateKey
+		}
+		if cfg.l2ChainID == nil {
+			return nil, errNoChainID
+		}
 
-	opts, err := bind.NewKeyedTransactorWithChainID(cfg.privateKey, cfg.l2ChainID)
+		opts, err = bind.NewKeyedTransactorWithChainID(cfg.privateKey, cfg.l2ChainID)
+	} else {
+		seqBytes, err := hex.DecodeString(cfg.HsmCreden)
+		apikey := option.WithCredentialsJSON(seqBytes)
+		client, err := kms.NewKeyManagementClient(context.Background(), apikey)
+		if err != nil {
+			log.Crit("gasoracle", "create signer error", err.Error())
+		}
+		mk := &bsscore.ManagedKey{
+			KeyName:      cfg.HsmAPIName,
+			EthereumAddr: common.HexToAddress(cfg.HsmAddress),
+			Gclient:      client,
+		}
+		opts, err = mk.NewEthereumTransactorrWithChainID(context.Background(), cfg.l2ChainID)
+		if err != nil {
+			log.Crit("gasoracle", "create signer error", err.Error())
+			return nil, err
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +81,7 @@ func wrapUpdateDaFee(daBackend *bindings.BVMEigenDataLayrFee, l2Backend DeployCo
 			return err
 		}
 		if !isDifferenceSignificant(currentDaFee.Uint64(), daFee.Uint64(), cfg.daFeeSignificanceFactor) {
-			log.Debug("non significant da fee update", "da", daFee, "current", currentDaFee)
+			log.Warn("non significant da fee update", "da", daFee, "current", currentDaFee)
 			return nil
 		}
 
@@ -72,12 +101,13 @@ func wrapUpdateDaFee(daBackend *bindings.BVMEigenDataLayrFee, l2Backend DeployCo
 		if err != nil {
 			return err
 		}
-		log.Debug("updating da fee", "tx.gasPrice", tx.GasPrice(), "tx.gasLimit", tx.Gas(),
+		log.Info("updating da fee", "tx.gasPrice", tx.GasPrice(), "tx.gasLimit", tx.Gas(),
 			"tx.data", hexutil.Encode(tx.Data()), "tx.to", tx.To().Hex(), "tx.nonce", tx.Nonce())
 		if err := l2Backend.SendTransaction(context.Background(), tx); err != nil {
-			return fmt.Errorf("cannot update base fee: %w", err)
+			return fmt.Errorf("cannot update da fee: %w", err)
 		}
-		log.Info("L1 base fee transaction sent", "hash", tx.Hash().Hex(), "baseFee", daFee)
+		log.Info("L1 da fee transaction sent", "hash", tx.Hash().Hex(), "daFee", daFee)
+		ometrics.GasOracleStats.DaFeeGauge.Update(daFee.Int64())
 
 		if cfg.waitForReceipt {
 			// Wait for the receipt

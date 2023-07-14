@@ -182,18 +182,28 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
       if (dataStore['Confirmed']) {
         // explore transaction list
         await this._storeTransactionListByDSId(
-          dataStoreRollupId['data_store_id']
+          dataStoreRollupId['data_store_id'],
+          this.options.mantleDaUpgradeDataStoreId
         )
 
         // batch transaction list
-        await this._storeBatchTransactionsByDSId(
-          dataStoreRollupId['data_store_id']
+        const execOk = await this._storeBatchTransactionsByDSId(
+          dataStoreRollupId['data_store_id'],
+          index,
+          this.options.mantleDaUpgradeDataStoreId
         )
-
+        this.logger.info('store batch transactions by store id', {
+          execValue: execOk,
+          batchIndex: index,
+        })
+        if (!execOk) {
+          return
+        }
         // put rollup store info to db
         await this.state.db.putRollupStoreByBatchIndex(
           {
             index: 0,
+            upgrade_data_store_id: this.options.mantleDaUpgradeDataStoreId,
             data_store_id: dataStoreRollupId['data_store_id'],
             status: dataStoreRollupId['status'],
             confirm_at: dataStoreRollupId['confirm_at'],
@@ -232,11 +242,12 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
         }
         await this.state.db.putDsById(
           dataStoreEntry,
-          dataStoreRollupId['data_store_id']
+          dataStoreRollupId['data_store_id'] +
+            this.options.mantleDaUpgradeDataStoreId
         )
+        await this.state.db.putLastBatchIndex(index)
+        this.daIngestionMetrics.syncBatchIndex.set(index)
       }
-      await this.state.db.putLastBatchIndex(index)
-      this.daIngestionMetrics.syncBatchIndex.set(index)
     }
   }
 
@@ -258,7 +269,7 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
           batchIndex
         )
         this.logger.info(
-          'dataStoreRollupId dataStoreRollupId dataStoreRollupId',
+          'get dataStoreRollupId of GetRollupStoreByRollupBatchIndex and tool dataStoreRollupId is',
           dataStoreRollupId
         )
         const dataStore = await this.GetDataStoreById(
@@ -267,6 +278,7 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
         await this.state.db.putRollupStoreByBatchIndex(
           {
             index: 0,
+            upgrade_data_store_id: this.options.mantleDaUpgradeDataStoreId,
             data_store_id: dataStoreRollupId['data_store_id'],
             status: dataStoreRollupId['status'],
             confirm_at: dataStoreRollupId['confirm_at'],
@@ -274,11 +286,49 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
           batchIndex
         )
         this.logger.info('Update batch index from(Confirmed)', dataStore)
+        // put data store to db
+        const dataStoreEntry: DataStoreEntry = {
+          dataStoreId: dataStore['Id'],
+          storeNumber: dataStore['StoreNumber'],
+          durationDataStoreId: dataStore['DurationDataStoreId'],
+          index: dataStore['Index'],
+          dataCommitment: dataStore['DataCommitment'],
+          msgHash: dataStore['MsgHash'],
+          stakesFromBlockNumber: dataStore['StakesFromBlockNumber'],
+          initTime: dataStore['InitTime'],
+          expireTime: dataStore['ExpireTime'],
+          duration: dataStore['Duration'],
+          numSys: dataStore['NumSys'],
+          numPar: dataStore['NumPar'],
+          degree: dataStore['Degree'],
+          storePeriodLength: dataStore['StorePeriodLength'],
+          fee: dataStore['Fee'],
+          confirmer: dataStore['Confirmer'],
+          header: dataStore['Header'],
+          initTxHash: dataStore['InitTxHash'],
+          initGasUsed: dataStore['InitGasUsed'],
+          initBlockNumber: dataStore['InitBlockNumber'],
+          confirmed: dataStore['Confirmed'],
+          ethSigned: dataStore['EthSigned'],
+          eigenSigned: dataStore['EigenSigned'],
+          nonSignerPubKeyHashes: dataStore['NonSignerPubKeyHashes'],
+          signatoryRecord: dataStore['SignatoryRecord'],
+          confirmTxHash: dataStore['ConfirmTxHash'],
+          confirmGasUsed: dataStore['ConfirmGasUsed'],
+        }
+        await this.state.db.putDsById(
+          dataStoreEntry,
+          dataStoreRollupId['data_store_id'] +
+            this.options.mantleDaUpgradeDataStoreId
+        )
         await this._storeTransactionListByDSId(
-          dataStoreRollupId['data_store_id']
+          dataStoreRollupId['data_store_id'],
+          this.options.mantleDaUpgradeDataStoreId
         )
         await this._storeBatchTransactionsByDSId(
-          dataStoreRollupId['data_store_id']
+          dataStoreRollupId['data_store_id'],
+          batchIndex,
+          this.options.mantleDaUpgradeDataStoreId
         )
       }
     }
@@ -305,22 +355,28 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     }
   }
 
-  private async _storeBatchTransactionsByDSId(storeId: number) {
+  private async _storeBatchTransactionsByDSId(
+    storeId: number,
+    daBatchIndex: number,
+    upgradeBatchIndex: number
+  ) {
     const transactionEntries: TransactionEntry[] = []
     if (storeId <= 0) {
-      return []
+      this.logger.error('storeId is zero')
+      return false
     }
     const batchTxs = await this.GetBatchTransactionByDataStoreId(storeId)
       .then((rst) => {
         return rst
       })
       .catch((error) => {
-        console.log('GetBatchTransactionByDataStoreId error ', error)
+        this.logger.error('GetBatchTransactionByDataStoreId error ', error)
         return []
       })
     try {
       if (batchTxs.length === 0) {
-        return
+        this.logger.error('batchTxs is empty')
+        return false
       }
       for (const batchTx of batchTxs) {
         const queueOrigin =
@@ -363,18 +419,30 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
         let target = constants.AddressZero
         let origin = null
         if (batchTx['TxMeta']['queueIndex'] != null) {
-          const enqueue = await this.state.db.getEnqueueByIndex(
-            BigNumber.from(batchTx['TxMeta']['queueIndex']).toNumber()
-          )
-          if (enqueue != null) {
-            gasLimit = enqueue.gasLimit
-            target = enqueue.target
-            origin = enqueue.origin
+          const latestEnqueue = await this.state.db.getLatestEnqueue()
+          if (latestEnqueue.index >= batchTx['TxMeta']['queueIndex']) {
+            this.logger.info('get queue index from da and l1(EigenLayer)', {
+              lastestEnqueue: latestEnqueue.index,
+              queueIndex: batchTx['TxMeta']['queueIndex'],
+            })
+            const enqueue = await this.state.db.getEnqueueByIndex(
+              BigNumber.from(batchTx['TxMeta']['queueIndex']).toNumber()
+            )
+            if (enqueue != null) {
+              gasLimit = enqueue.gasLimit
+              target = enqueue.target
+              origin = enqueue.origin
+            }
+          } else {
+            this.logger.error(
+              'ctc latest enqueue index is less da enqueue index'
+            )
+            return false
           }
         }
         transactionEntries.push({
           index: batchTx['TxMeta']['index'],
-          batchIndex: 0,
+          batchIndex: daBatchIndex,
           blockNumber: batchTx['TxMeta']['l1BlockNumber'],
           timestamp: batchTx['TxMeta']['l1Timestamp'],
           gasLimit,
@@ -392,14 +460,21 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
         )
       }
       await this.state.db.putTransactions(transactionEntries)
-      await this.state.db.putBatchTransactionByDsId(transactionEntries, storeId)
-      this.daIngestionMetrics.syncDataStoreId.set(storeId)
+      await this.state.db.putBatchTransactionByDsId(
+        transactionEntries,
+        storeId + upgradeBatchIndex
+      )
+      this.daIngestionMetrics.syncDataStoreId.set(upgradeBatchIndex + storeId)
+      return true
     } catch (error) {
       throw new Error(`eigen layer sync finish, error is: ${error}`)
     }
   }
 
-  private async _storeTransactionListByDSId(storeId: number): Promise<void> {
+  private async _storeTransactionListByDSId(
+    storeId: number,
+    upgradeBatchIndex: number
+  ): Promise<void> {
     const txList = await this.GetTransactionListByStoreNumber(storeId)
     if (
       txList === null ||
@@ -419,20 +494,29 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
         txHash: tx['TxHash'],
       })
     }
-    await this.state.db.putTxListByDSId(transactionEntries, storeId)
+    await this.state.db.putTxListByDSId(
+      transactionEntries,
+      upgradeBatchIndex + storeId
+    )
   }
 
   private async GetLatestTransactionBatchIndex(): Promise<number> {
+    const controller = new AbortController()
+    const timeOutSignal = controller.signal
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, this.options.mantleDaRequestTimeout)
     const data = await fetch(
       this.state.mtBatcherFetchUrl + '/eigen/getLatestTransactionBatchIndex',
       {
+        signal: timeOutSignal,
         method: 'GET',
         headers: { Accept: 'application/json' },
       }
     )
       .then((res) => res.json())
       .catch((error) => {
-        console.log(
+        this.logger.error(
           'GetLatestTransactionBatchIndex HTTP  error : status!=200 error info = ',
           error
         )
@@ -442,6 +526,7 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     if (typeof data === 'number') {
       newTxBatchIndex = data
     }
+    clearTimeout(timeoutId)
     return newTxBatchIndex
   }
 
@@ -451,10 +536,16 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     const requestData = JSON.stringify({
       batch_index: batchIndex,
     })
+    const controller = new AbortController()
+    const timeOutSignal = controller.signal
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, this.options.mantleDaRequestTimeout)
     // 👇️ const response: Response
-    return fetch(
+    const result = fetch(
       this.state.mtBatcherFetchUrl + '/eigen/getRollupStoreByRollupBatchIndex',
       {
+        signal: timeOutSignal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: requestData,
@@ -464,6 +555,8 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
       .catch((error) => {
         return error
       })
+    clearTimeout(timeoutId)
+    return result
   }
 
   private async GetBatchTransactionByDataStoreId(
@@ -472,10 +565,16 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     const requestData = JSON.stringify({
       store_number: storeNumber,
     })
+    const controller = new AbortController()
+    const timeOutSignal = controller.signal
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, this.options.mantleDaRequestTimeout)
     // 👇️ const response: Response
-    return fetch(
+    const result = fetch(
       this.state.mtBatcherFetchUrl + '/dtl/getBatchTransactionByDataStoreId',
       {
+        signal: timeOutSignal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: requestData,
@@ -483,28 +582,41 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     )
       .then((res) => res.json())
       .catch((error) => {
-        console.log(
+        this.logger.error(
           'GetBatchTransactionByDataStoreId  HTTP error status != 200 ',
           error
         )
         return error
       })
+    clearTimeout(timeoutId)
+    return result
   }
 
   private async GetDataStoreById(storeNumber: string): Promise<any> {
     // 👇️ const response: Response
-    return fetch(this.state.mtBatcherFetchUrl + '/browser/getDataStoreById', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        store_id: storeNumber,
-      }),
-    })
+    const controller = new AbortController()
+    const timeOutSignal = controller.signal
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, this.options.mantleDaRequestTimeout)
+    const result = fetch(
+      this.state.mtBatcherFetchUrl + '/browser/getDataStoreById',
+      {
+        signal: timeOutSignal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_id: storeNumber,
+        }),
+      }
+    )
       .then((res) => res.json())
       .catch((error) => {
-        console.log('GetDataStoreById HTTP error status != 200 ', error)
+        this.logger.error('GetDataStoreById HTTP error status != 200 ', error)
         return error
       })
+    clearTimeout(timeoutId)
+    return result
   }
 
   private async GetTransactionListByStoreNumber(
@@ -513,10 +625,16 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     const requestData = JSON.stringify({
       store_number: storeNumber,
     })
+    const controller = new AbortController()
+    const timeOutSignal = controller.signal
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, this.options.mantleDaRequestTimeout)
     // 👇️ const response: Response
-    return fetch(
+    const result = fetch(
       this.state.mtBatcherFetchUrl + '/browser/GetTransactionListByStoreNumber',
       {
+        signal: timeOutSignal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: requestData,
@@ -524,8 +642,12 @@ export class DaIngestionService extends BaseService<DaIngestionServiceOptions> {
     )
       .then((res) => res.json())
       .catch((error) => {
-        console.log('GetTransactionListByStoreNumber HTTP error status != 200 ')
+        this.logger.error(
+          'GetTransactionListByStoreNumber HTTP error status != 200 '
+        )
         return error
       })
+    clearTimeout(timeoutId)
+    return result
   }
 }

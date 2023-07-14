@@ -2,12 +2,13 @@ package signer
 
 import (
 	"context"
+	tss "github.com/mantlenetworkio/mantle/tss/common"
+	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/mantlenetworkio/mantle/l2geth/log"
 	"github.com/mantlenetworkio/mantle/tss/slash"
-	"math/big"
-	"time"
 )
 
 func (p *Processor) deleteSlashing() {
@@ -46,6 +47,17 @@ func (p *Processor) handleSlashing(si slash.SlashingInfo) {
 		if found { // this slashing is confirmed on ethereum
 			p.nodeStore.RemoveSlashingInfo(si.Address, si.BatchIndex)
 		}
+		return
+	}
+
+	unJailMembers, err := p.tssGroupManagerCaller.GetTssGroupUnJailMembers(nil)
+	if err != nil {
+		log.Error("failed to GetTssGroupUnJailMembers", "err", err)
+		return
+	}
+	if !tss.IsAddrExist(unJailMembers, si.Address) {
+		log.Warn("can not slash the address are not unJailed", "address", si.Address.String())
+		p.nodeStore.RemoveSlashingInfo(si.Address, si.BatchIndex)
 		return
 	}
 

@@ -31,7 +31,6 @@ func (r Receipt) MarshalJSON() ([]byte, error) {
 		L1GasUsed         *hexutil.Big   `json:"l1GasUsed" gencodec:"required"`
 		L1Fee             *hexutil.Big   `json:"l1Fee" gencodec:"required"`
 		FeeScalar         *big.Float     `json:"l1FeeScalar" gencodec:"required"`
-        // use eigenDA
 		DAGasPrice        *hexutil.Big   `json:"daGasPrice" gencodec:"required"`
 		DAGasUsed         *hexutil.Big   `json:"daGasUsed" gencodec:"required"`
 		DAFee             *hexutil.Big   `json:"daFee" gencodec:"required"`
@@ -138,13 +137,16 @@ func (r *Receipt) UnmarshalJSON(input []byte) error {
 		return errors.New("missing required field 'l1FeeScalar' for Receipt")
 	}
 	r.FeeScalar = dec.FeeScalar
+	if dec.DAGasPrice == nil {
+		return errors.New("missing required field 'daGasPrice' for Receipt")
+	}
 	r.DAGasPrice = (*big.Int)(dec.DAGasPrice)
 	if dec.DAGasUsed == nil {
-		return errors.New("missing required field 'l1GasUsed' for Receipt")
+		return errors.New("missing required field 'daGasUsed' for Receipt")
 	}
 	r.DAGasUsed = (*big.Int)(dec.DAGasUsed)
 	if dec.DAFee == nil {
-		return errors.New("missing required field 'l1Fee' for Receipt")
+		return errors.New("missing required field 'daFee' for Receipt")
 	}
 	r.DAFee = (*big.Int)(dec.DAFee)
 	return nil

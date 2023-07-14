@@ -1,4 +1,5 @@
 import { ethers } from 'ethers'
+import { type } from 'os'
 
 /**
  * Defines the configuration for a deployment.
@@ -78,6 +79,11 @@ export interface DeployConfig {
    * Address of the Proposer (publishes to SCC).
    */
   bvmProposerAddress: string
+
+  /**
+   * Address of the Rolluper (publishes to Rollup).
+   */
+  bvmRolluperAddress: string
 
   /**
    * Address of the account that will sign blocks.
@@ -163,6 +169,38 @@ export interface DeployConfig {
    * Optional block number to enable the Berlin hardfork (default: 0).
    */
   hfBerlinBlock?: number
+
+  /**
+   * deployer privete key
+   */
+  contractsDeployerKey: string
+
+  /**
+   * deployer rpc url
+   */
+  contractsRpcUrl: string
+
+  /**
+   * Optional initial sendAmountPerYear for TssReward contract
+   */
+  tssRewardSendAmountPerYear?: number
+
+  /**
+   * Optional initial waitingTime for TssReward contract
+   */
+  tssRewardWaitingTime?: number
+
+  /**
+   * Optional initial minStakeAmount for TssDelegationManager contract
+   */
+  tssDelegationManagerMinStakeAmount: string
+
+
+  /**
+   * Address of tss manager.
+   */
+  tssManagerAddress: string
+
 }
 
 /**
@@ -210,16 +248,19 @@ const configSpec: {
   blockStaleMeasure: {
     type: 'number',
   },
-  daFraudProofPeriod:  {
+  daFraudProofPeriod: {
     type: 'number',
   },
-  l2SubmittedBlockNumber:  {
+  l2SubmittedBlockNumber: {
     type: 'number',
   },
   bvmSequencerAddress: {
     type: 'address',
   },
   bvmProposerAddress: {
+    type: 'address',
+  },
+  bvmRolluperAddress: {
     type: 'address',
   },
   bvmBlockSignerAddress: {
@@ -264,11 +305,11 @@ const configSpec: {
   },
   gasPriceOracleIsBurning: {
     type: 'number',
-    default: 1,
+    default: 0,
   },
   gasPriceOracleCharge: {
     type: 'number',
-    default: 0,
+    default: 1,
   },
   gasPriceOracleL1BaseFee: {
     type: 'number',
@@ -276,11 +317,29 @@ const configSpec: {
   },
   gasPriceOracleL2GasPrice: {
     type: 'number',
-    default: 1,
+    default: 50_000_000,
   },
   hfBerlinBlock: {
     type: 'number',
     default: 0,
+  },
+  contractsDeployerKey: {
+    type: 'string',
+  },
+  contractsRpcUrl: {
+    type: 'string',
+  },
+  tssRewardSendAmountPerYear: {
+    type: 'number',
+  },
+  tssRewardWaitingTime: {
+    type: 'number',
+  },
+  tssDelegationManagerMinStakeAmount: {
+    type: 'string',
+  },
+  tssManagerAddress: {
+    type: 'string',
   },
 }
 
